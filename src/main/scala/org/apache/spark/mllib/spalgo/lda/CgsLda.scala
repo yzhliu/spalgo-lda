@@ -2,7 +2,7 @@ package org.apache.spark.mllib.spalgo.lda
 
 import breeze.linalg.{CSCMatrix => BSM, DenseMatrix => BDM, DenseVector => BDV, Matrix => BM, SparseVector => BSV, Vector => BV, sum => brzSum}
 import breeze.stats.distributions.Multinomial
-import org.apache.spark.graphx.{EdgeTriplet, VertexId, Graph, Edge}
+import org.apache.spark.graphx._
 import org.apache.spark.mllib.linalg.{Vector => SV, Vectors}
 import org.apache.spark.mllib.spalgo.lda.components.TopicCount
 import org.apache.spark.rdd.RDD
@@ -11,9 +11,28 @@ import org.apache.spark.storage.StorageLevel
 import scala.collection.mutable.ListBuffer
 import scala.util.Random
 
+class EdgeData(dimension: Int, numTopics: Int, rnd: Random) {
+  val topicAssignments = Array.ofDim[Int](dimension)
+  for (i <- 0 until dimension) {
+    topicAssignments(i) = rnd.nextInt(numTopics)
+  }
+
+  override def toString = {
+    s"TopicAssignments[${topicAssignments.mkString(",")}]"
+  }
+}
+
+class VertexData(numTopics: Int) {
+  val topicAttachedCounts = Array.ofDim[Int](numTopics)
+
+  override def toString = {
+    s"TopicCounts[${topicAttachedCounts.mkString(",")}]"
+  }
+}
+
 class CgsLda extends Serializable {
-  private type VD = Array[Int]
-  private type ED = Array[Int]
+  private type VD = VertexData
+  private type ED = EdgeData
   // edge assignments
   private type Msg = TopicCount
 
@@ -34,26 +53,27 @@ class CgsLda extends Serializable {
       }
     })
     val graphInit = Graph.fromEdges(edges, null, edgeStorageLevel = StorageLevel.MEMORY_AND_DISK)
-    graphInit.mapVertices((vertexId, _) => Array.ofDim[Int](numTopics))
+    graphInit.mapVertices((vertexId, _) => new VertexData(numTopics))
   }
 
   def train(documents: RDD[(Long, SV)]) = {
     val graph = load(documents, numTopics)
-    val trainedGraph = graph.pregel(new TopicCount(numTopics))(vertexUpdater, sendMessage, mergeMessage)
+    //val trainedGraph = graph.pregel(new TopicCount(numTopics))(vertexUpdater, sendMessage, mergeMessage)
   }
 
+  /*
   private def vertexUpdater(vertexId: VertexId, vertexData: VD, message: Msg): VD = {
     message.topics
   }
+  */
 
+  /*
   private def sendMessage(triplet: EdgeTriplet[VD, ED]): Iterator[(VertexId, Msg)] = {
-    /*
-    if (triplet.srcAttr + triplet.attr < triplet.dstAttr) {
-      Iterator((triplet.dstId, triplet.srcAttr + triplet.attr))
-    } else {
-      Iterator.empty
-    }
-    */
+//    if (triplet.srcAttr + triplet.attr < triplet.dstAttr) {
+//      Iterator((triplet.dstId, triplet.srcAttr + triplet.attr))
+//    } else {
+//      Iterator.empty
+//    }
     val wordTopicCount = triplet.srcAttr
     val docTopicCount = triplet.dstAttr
     require(docTopicCount.length == numTopics)
@@ -92,29 +112,40 @@ class CgsLda extends Serializable {
     //context.signal(get_other_vertex(edge, vertex));
     Iterator.empty
   }
+  */
 
   private def mergeMessage(msgA: Msg, msgB: Msg): Msg = {
     msgA.add(msgB)
+  }
+
+  private def sendMessageAdvanced(triplet: EdgeContext[VD, ED, Msg]) = {
   }
 
   private def initializeEdges(
      rnd: Random,
      words: SV,
      docId: Long,
-     numTopics: Int) = {//: Iterator[Edge[ED]] = {
+     numTopics: Int) = {
     require(docId >= 0, s"Invalid document id $docId")
     val vertexDocId = -(docId + 1L)
-    val edges = ListBuffer[Edge[Array[Int]]]()
+    val edges = ListBuffer[Edge[ED]]()
     words.foreachActive {
       case (wordId, counter) if counter > 0.0 =>
         val vertexWordId = wordId + 1L
-        val topics = Array.ofDim[Int](counter.toInt)
-        for (i <- 0 until counter.toInt) {
-          topics(i) = rnd.nextInt(numTopics)
-        }
-        edges += Edge(vertexWordId, vertexDocId, topics)
+        val edgeData = new ED(counter.toInt, numTopics, rnd)
+        edges += Edge(vertexWordId, vertexDocId, edgeData)
       case _ =>
     }
     edges
   }
+
+  // testing
+  def aggregate(graph: Graph[VD, ED]): VertexRDD[Msg] = {
+    graph.aggregateMessages(msgFun, reduceFun)
+  }
+  def msgFun(triplet: EdgeContext[VD, ED, Msg]) {
+    val srcData = triplet.srcAttr
+    srcData.topicAttachedCounts(0) = 100000
+  }
+  def reduceFun(a: Msg, b: Msg): Msg = a.add(b)
 }

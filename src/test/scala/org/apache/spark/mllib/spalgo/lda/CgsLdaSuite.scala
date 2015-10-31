@@ -1,5 +1,6 @@
 package org.apache.spark.mllib.spalgo.lda
 
+import org.apache.spark.graphx.EdgeContext
 import org.apache.spark.{SparkConf, SparkContext}
 import org.scalatest._
 import org.apache.spark.mllib.linalg.{Vector => SV, Vectors, DenseVector}
@@ -28,8 +29,14 @@ class CgsLdaSuite extends FunSuite with BeforeAndAfterAll with ShouldMatchers {
     val documents = sc.parallelize(Array(
       (0L, Vectors.dense(1.0, 0.0, 3.0)),
       (1L, Vectors.dense(0.0, 2.0, 1.0))))
-    val graph = new CgsLda().load(documents, 2)
+    val cgsLda = new CgsLda
+    val graph = cgsLda.load(documents, 2)
+    val edges = graph.edges.collect()
     println(graph.edges.collect().mkString(", "))
+    println(graph.vertices.collect().mkString(", "))
+    println("--------Aggregating-------------")
+
+    val vertexRDD = cgsLda.aggregate(graph)
     println(graph.vertices.collect().mkString(", "))
   }
 }
