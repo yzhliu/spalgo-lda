@@ -27,7 +27,7 @@ class EdgeData(dimension: Int, numTopics: Int, rnd: Random) extends Serializable
 }
 
 class VertexData(numTopics: Int) extends Serializable {
-  val topicAttachedCounts = BreezeVector.zeros[Int](numTopics)
+  var topicAttachedCounts = BreezeVector.zeros[Int](numTopics)
   def increment(topicId: Int): Unit = {
     increment(topicId, 1)
   }
@@ -41,8 +41,10 @@ class VertexData(numTopics: Int) extends Serializable {
   }
   def add(otherVertexData: VertexData): VertexData = {
     require(topicAttachedCounts.size == otherVertexData.topicAttachedCounts.size)
-    topicAttachedCounts += otherVertexData.topicAttachedCounts
-    this
+    val newTopicAttachedCounts = topicAttachedCounts + otherVertexData.topicAttachedCounts
+    val newData = new VertexData(1)
+    newData.topicAttachedCounts = newTopicAttachedCounts
+    newData
   }
   override def toString = {
     // TODO
@@ -78,14 +80,16 @@ class CgsLda(val alpha: Double, val beta: Double) extends Serializable {
     val initVertexData = graph.aggregateMessages[Msg](
       triplet => {
         val edgeData = triplet.attr
-        val vertexData = new Msg(numTopics)
+        val message = new Msg(numTopics)
         for (w <- 0 until edgeData.size) {
-          vertexData.increment(edgeData(w))
+          message.increment(edgeData(w))
         }
-        triplet.sendToSrc(vertexData)
-        triplet.sendToDst(vertexData)
+        println(s"Debug src=${triplet.srcId}, dst=${triplet.dstId}, edgeData=$edgeData, message=$message")
+        triplet.sendToSrc(message)
+        triplet.sendToDst(message)
       },
       mergeMessage)
+    println("initVertexData: " + initVertexData.collect().mkString(","))
     graph = graph.joinVertices(initVertexData){ case (vertexId, oldData, newData) => newData }
     globalTopicCount = graph.vertices.filter(t => t._1 > 0).map(_._2).
       aggregate(new VD(numTopics))((a, b) => {
