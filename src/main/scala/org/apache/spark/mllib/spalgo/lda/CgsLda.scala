@@ -1,9 +1,9 @@
 package org.apache.spark.mllib.spalgo.lda
 
-import breeze.linalg.{CSCMatrix => BSM, DenseMatrix => BDM, DenseVector => BDV, Matrix => BM, SparseVector => BSV, Vector => BV, sum => brzSum}
+import breeze.linalg.{CSCMatrix => BSM, DenseMatrix => BDM, DenseVector => BreezeDenseVector, Matrix => BM, SparseVector => BreezeSparseVector, Vector => BreezeVector}
 import breeze.stats.distributions.Multinomial
 import org.apache.spark.graphx._
-import org.apache.spark.mllib.linalg.{Vector => SV, Vectors}
+import org.apache.spark.mllib.linalg.{Vector, Vectors}
 import org.apache.spark.mllib.spalgo.lda.components.TopicCount
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
@@ -11,39 +11,59 @@ import org.apache.spark.storage.StorageLevel
 import scala.collection.mutable.ListBuffer
 import scala.util.Random
 
-class EdgeData(dimension: Int, numTopics: Int, rnd: Random) {
+class EdgeData(dimension: Int, numTopics: Int, rnd: Random) extends Serializable {
   val topicAssignments = Array.ofDim[Int](dimension)
   for (i <- 0 until dimension) {
     topicAssignments(i) = rnd.nextInt(numTopics)
   }
+
+  def size = topicAssignments.length
+
+  def apply(idx: Int) = topicAssignments(idx)
 
   override def toString = {
     s"TopicAssignments[${topicAssignments.mkString(",")}]"
   }
 }
 
-class VertexData(numTopics: Int) {
-  val topicAttachedCounts = Array.ofDim[Int](numTopics)
-
+class VertexData(numTopics: Int) extends Serializable {
+  val topicAttachedCounts = BreezeVector.zeros[Int](numTopics)
+  def increment(topicId: Int): Unit = {
+    increment(topicId, 1)
+  }
+  def increment(topicId: Int, delta: Int): Unit = {
+    require(topicId >= 0 && topicId < topicAttachedCounts.length)
+    topicAttachedCounts(topicId) += delta
+  }
+  def apply(topicId: Int): Int = {
+    require(topicId >= 0 && topicId < topicAttachedCounts.length)
+    topicAttachedCounts(topicId)
+  }
+  def add(otherVertexData: VertexData): VertexData = {
+    require(topicAttachedCounts.size == otherVertexData.topicAttachedCounts.size)
+    topicAttachedCounts += otherVertexData.topicAttachedCounts
+    this
+  }
   override def toString = {
-    s"TopicCounts[${topicAttachedCounts.mkString(",")}]"
+    // TODO
+    s"TopicCounts[${topicAttachedCounts.toArray.mkString(",")}]"
   }
 }
 
-class CgsLda extends Serializable {
+class CgsLda(val alpha: Double, val beta: Double) extends Serializable {
   private type VD = VertexData
   private type ED = EdgeData
   // edge assignments
-  private type Msg = TopicCount
+  private type Msg = VertexData
 
   private var numTopics: Int = _
   private var numWords: Int = _
-  private var alpha: Double = _
-  private var beta: Double = _
+  private var globalTopicCount: VertexData = _
+  private var graph: Graph[VD, ED] = _
 
   // vertex-data: (should be atomic) count of appearance of each topic
   // edge-data: the topic assigned to every appearance of the word in this document
-  def load(documents: RDD[(Long, SV)], numTopics: Int): Graph[VD, ED] = {
+  def load(documents: RDD[(Long, Vector)], numTopics: Int): Graph[VD, ED] = {
     this.numTopics = numTopics
     this.numWords = documents.first()._2.size
     val edges = documents.mapPartitionsWithIndex((pid, iter) => {
@@ -53,77 +73,72 @@ class CgsLda extends Serializable {
       }
     })
     val graphInit = Graph.fromEdges(edges, null, edgeStorageLevel = StorageLevel.MEMORY_AND_DISK)
-    graphInit.mapVertices((vertexId, _) => new VertexData(numTopics))
+    graph = graphInit.mapVertices((vertexId, _) => new VertexData(numTopics))
+    // calculate topic counts for words and documents
+    val initVertexData = graph.aggregateMessages[Msg](
+      triplet => {
+        val edgeData = triplet.attr
+        val vertexData = new Msg(numTopics)
+        for (w <- 0 until edgeData.size) {
+          vertexData.increment(edgeData(w))
+        }
+        triplet.sendToSrc(vertexData)
+        triplet.sendToDst(vertexData)
+      },
+      mergeMessage)
+    graph = graph.joinVertices(initVertexData){ case (vertexId, oldData, newData) => newData }
+    globalTopicCount = graph.vertices.filter(t => t._1 > 0).map(_._2).
+      aggregate(new VD(numTopics))((a, b) => {
+      a.add(b)
+    }, (a, b) => { a.add(b) })
+    // init globalTopicCount
+    graph
   }
 
-  def train(documents: RDD[(Long, SV)]) = {
+  def train(documents: RDD[(Long, Vector)]) = {
     val graph = load(documents, numTopics)
     //val trainedGraph = graph.pregel(new TopicCount(numTopics))(vertexUpdater, sendMessage, mergeMessage)
   }
 
-  /*
-  private def vertexUpdater(vertexId: VertexId, vertexData: VD, message: Msg): VD = {
-    message.topics
+  def nextIteration() = {
+    val messages: VertexRDD[Msg] = graph.aggregateMessages(sendMessage, mergeMessage)
+    messages
   }
-  */
 
-  /*
-  private def sendMessage(triplet: EdgeTriplet[VD, ED]): Iterator[(VertexId, Msg)] = {
-//    if (triplet.srcAttr + triplet.attr < triplet.dstAttr) {
-//      Iterator((triplet.dstId, triplet.srcAttr + triplet.attr))
-//    } else {
-//      Iterator.empty
-//    }
+  private def sendMessage(triplet: EdgeContext[VD, ED, Msg]): Unit = {
     val wordTopicCount = triplet.srcAttr
     val docTopicCount = triplet.dstAttr
-    require(docTopicCount.length == numTopics)
-    require(wordTopicCount.length == numTopics)
+    //require(docTopicCount.length == numTopics)
+    //require(wordTopicCount.length == numTopics)
     // run the actual gibbs sampling
-    val prob = BV.zeros[Double](numTopics)
+    val prob = BreezeVector.zeros[Double](numTopics)
     val assignment = triplet.attr
-    //edge.data().nchanges = 0
-    assignment.foreach(topicId => {
-      val oldTopicId = topicId
-      //if (asg != NULL_TOPIC) {
-        // construct the cavity
-        docTopicCount(topicId) -= 1
-        wordTopicCount(topicId) -= 1
-        //--GLOBAL_TOPIC_COUNT[asg]
-      //}
+    val betaSum = beta * numWords
+    assignment.topicAssignments.foreach(topicId => {
+      docTopicCount.increment(topicId, -1)
+      wordTopicCount.increment(topicId, -1)
+      globalTopicCount.increment(topicId, -1)
       for (t <- 0 until numTopics) {
-        val n_dt = Math.max(docTopicCount(t), 0).toDouble
-        val n_wt = Math.max(wordTopicCount(t), 0).toDouble
-        val n_t = 0.0
-        //val n_t = Math.max(globalTopicCount(t), 0).toDouble
-        prob(t) = (alpha + n_dt) * (beta + n_wt) / (beta * numWords + n_t)
+        prob(t) = (alpha + docTopicCount(t)) * (beta + wordTopicCount(t)) / (betaSum + globalTopicCount(t))
       }
       val rnd = Multinomial(prob)
       val asg = rnd.draw()
-      // asg = std::max_element(prob.begin(), prob.end()) - prob.begin();
-      docTopicCount(asg) += 1
-      wordTopicCount(asg) += 1
-      //++ GLOBAL_TOPIC_COUNT[asg]
-      if (asg != oldTopicId) {
-        //++ edge.data().nchanges;
-        //INCREMENT_EVENT(TOKEN_CHANGES, 1);
-      }
+      docTopicCount.increment(asg)
+      wordTopicCount.increment(asg)
+      globalTopicCount.increment(asg)
     }) // End of loop over each token
-    // singla the other vertex
-    //context.signal(get_other_vertex(edge, vertex));
-    Iterator.empty
+    // signal the other vertex
+    triplet.sendToSrc(wordTopicCount)
+    triplet.sendToDst(docTopicCount)
   }
-  */
 
   private def mergeMessage(msgA: Msg, msgB: Msg): Msg = {
     msgA.add(msgB)
   }
 
-  private def sendMessageAdvanced(triplet: EdgeContext[VD, ED, Msg]) = {
-  }
-
   private def initializeEdges(
      rnd: Random,
-     words: SV,
+     words: Vector,
      docId: Long,
      numTopics: Int) = {
     require(docId >= 0, s"Invalid document id $docId")
@@ -138,14 +153,4 @@ class CgsLda extends Serializable {
     }
     edges
   }
-
-  // testing
-  def aggregate(graph: Graph[VD, ED]): VertexRDD[Msg] = {
-    graph.aggregateMessages(msgFun, reduceFun)
-  }
-  def msgFun(triplet: EdgeContext[VD, ED, Msg]) {
-    val srcData = triplet.srcAttr
-    srcData.topicAttachedCounts(0) = 100000
-  }
-  def reduceFun(a: Msg, b: Msg): Msg = a.add(b)
 }

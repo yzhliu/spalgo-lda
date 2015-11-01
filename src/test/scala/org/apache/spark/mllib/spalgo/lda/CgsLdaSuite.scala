@@ -29,14 +29,20 @@ class CgsLdaSuite extends FunSuite with BeforeAndAfterAll with ShouldMatchers {
     val documents = sc.parallelize(Array(
       (0L, Vectors.dense(1.0, 0.0, 3.0)),
       (1L, Vectors.dense(0.0, 2.0, 1.0))))
-    val cgsLda = new CgsLda
-    val graph = cgsLda.load(documents, 2)
-    val edges = graph.edges.collect()
-    println(graph.edges.collect().mkString(", "))
-    println(graph.vertices.collect().mkString(", "))
-    println("--------Aggregating-------------")
+    val numTopics = 2
+    val cgsLda = new CgsLda(50.0/numTopics, 0.01)
+    val graph = cgsLda.load(documents, numTopics)
 
-    val vertexRDD = cgsLda.aggregate(graph)
-    println(graph.vertices.collect().mkString(", "))
+    val edges = graph.edges.collect()
+    val vertices = graph.vertices.collect().toMap
+    assert(edges.length == 4)
+    assert(vertices.size == 5)
+
+    val messages = cgsLda.nextIteration()
+    messages.collect().foreach { case (vertexId, message) =>
+      val vertexType = if (vertexId < 0) "document" else "word"
+      println(s"Old counts for $vertexType($vertexId): ${vertices(vertexId)}")
+      println(s"New counts for $vertexType($vertexId): $message")
+    }
   }
 }
