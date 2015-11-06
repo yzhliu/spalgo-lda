@@ -4,8 +4,7 @@ import breeze.linalg.{CSCMatrix => BSM, DenseMatrix => BDM, DenseVector => Breez
 import breeze.stats.distributions.Multinomial
 import org.apache.spark.graphx._
 import org.apache.spark.graphx.impl.GraphImpl
-import org.apache.spark.mllib.linalg.{Vector, Vectors}
-import org.apache.spark.mllib.spalgo.lda.components.TopicCount
+import org.apache.spark.mllib.linalg.{DenseMatrix, Matrix, Vector}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
 
@@ -27,7 +26,7 @@ class EdgeData(dimension: Int, numTopics: Int, rnd: Random) extends Serializable
   }
 }
 
-class VertexData(numTopics: Int) extends Serializable {
+class VertexData(val numTopics: Int) extends Serializable {
   var topicAttachedCounts = BreezeVector.zeros[Int](numTopics)
   def increment(topicId: Int): Unit = {
     increment(topicId, 1)
@@ -87,9 +86,31 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
       nextIteration()
       i += 1
     }
+    // TODO: unpersist graph
   }
 
-  def nextIteration(): Unit = {
+  def estimateTopicDistributions(): Matrix = {
+    val messages: VertexRDD[Msg]
+      = graph.aggregateMessages(sendMessage, mergeMessage).persist(StorageLevel.MEMORY_AND_DISK)
+    val newG = graph.joinVertices(messages) {
+      case (vertexId, null, newData) => newData
+    }
+    // calculate topic counts for words and documents
+    globalTopicCount = calculateGlobalTopicCount(newG)
+    val wordTopicCount = newG.vertices.filter(t => t._1 > 0).aggregateByKey(new VD(numTopics))(_ + _, _ + _).collect()
+    val wordTopicDistribution = DenseMatrix.zeros(numWords, numTopics)
+    val betaSum = beta * numWords
+    wordTopicCount.foreach { case (wordId, topicCount) =>
+      require(topicCount.numTopics == numTopics)
+      for (t <- 0 until numTopics) {
+        val phi = (topicCount(t) + beta) / (globalTopicCount(t) + betaSum)
+        wordTopicDistribution(wordId.toInt-1, t) = phi
+      }
+    }
+    wordTopicDistribution
+  }
+
+  private def nextIteration(): Unit = {
     val prevG = graph
     // init globalTopicCount
     val messages: VertexRDD[Msg]
@@ -98,7 +119,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
       case (vertexId, null, newData) => newData
     }
     // calculate topic counts for words and documents
-    globalTopicCount = calculateGlobalTopicCount(prevG)
+    globalTopicCount = calculateGlobalTopicCount(newG)
     newG = newG.mapTriplets((pid: PartitionID, iter: Iterator[EdgeTriplet[VD, ED]]) => {
       // sample the topic assignments z_{di}
       iter.map(triplet => {
@@ -120,6 +141,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
           }
           val rnd = Multinomial(prob)
           val newTopicId = rnd.draw()
+          assignment.topicAssignments(i) = newTopicId
           docTopicCount.increment(newTopicId)
           wordTopicCount.increment(newTopicId)
           globalTopicCount.increment(newTopicId)
@@ -150,6 +172,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
   }
 
   private def calculateGlobalTopicCount(g: Graph[VD, ED]): VD = {
+    // words' vertexId > 0
     g.vertices.filter(t => t._1 > 0).map(_._2).aggregate(new VD(numTopics))(_ + _, _ + _)
   }
 
