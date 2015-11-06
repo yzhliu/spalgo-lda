@@ -61,7 +61,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
   // edge assignments
   private type Msg = VertexData
 
-  private var numWords: Int = _
+  var numWords: Int = _
   private var globalTopicCount: VertexData = _
   private var graph: Graph[VD, ED] = _
 
@@ -150,7 +150,9 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
       })
     }, TripletFields.All)
     graph = GraphImpl(newG.vertices.mapValues(t => null), newG.edges)
-    graph.persist(StorageLevel.MEMORY_AND_DISK)
+    // FXIME: cause java.lang.UnsupportedOperationException:
+    // Cannot change storage level of an RDD after it was already assigned a level
+    //graph.persist(StorageLevel.MEMORY_AND_DISK)
 
     messages.unpersist(blocking = false)
     prevG.edges.unpersist(blocking = false)

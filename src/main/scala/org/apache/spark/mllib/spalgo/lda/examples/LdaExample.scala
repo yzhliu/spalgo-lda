@@ -18,5 +18,12 @@ object LdaExample {
     // Cluster the documents into three topics using LDA
     val cgsLda = new CgsLda(10.0, 0.01, 3)
     cgsLda.train(corpus, 100)
+    println("Learned topics (as distributions over vocab of " + cgsLda.numWords + " words):")
+    val topics = cgsLda.estimateTopicDistributions()
+    for (topic <- Range(0, 3)) {
+      print("Topic " + topic + ":")
+      for (word <- Range(0, cgsLda.numWords)) { print(" " + topics(word, topic)); }
+      println()
+    }
   }
 }
