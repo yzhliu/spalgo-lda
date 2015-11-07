@@ -1,9 +1,8 @@
 package org.apache.spark.mllib.spalgo.lda
 
-import org.apache.spark.graphx.EdgeContext
+import org.apache.spark.mllib.linalg.{Vector => SV, Vectors}
 import org.apache.spark.{SparkConf, SparkContext}
 import org.scalatest._
-import org.apache.spark.mllib.linalg.{Vector => SV, Vectors, DenseVector}
 
 class CgsLdaSuite extends FunSuite with BeforeAndAfterAll with ShouldMatchers {
   @transient var sc: SparkContext = _
@@ -11,7 +10,7 @@ class CgsLdaSuite extends FunSuite with BeforeAndAfterAll with ShouldMatchers {
   override def beforeAll() {
     super.beforeAll()
     val conf = new SparkConf()
-      .setMaster("local[2]")
+      .setMaster("local[1]")
       .setAppName("CgsLdaTest")
       .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
     sc = new SparkContext(conf)
@@ -37,6 +36,8 @@ class CgsLdaSuite extends FunSuite with BeforeAndAfterAll with ShouldMatchers {
     val vertices = graph.vertices.collect().toMap
     assert(edges.length == 4)
     assert(vertices.size == 5)
+
+    cgsLda.train(documents, 100)
 
     /*
     val messages = cgsLda.nextIteration()

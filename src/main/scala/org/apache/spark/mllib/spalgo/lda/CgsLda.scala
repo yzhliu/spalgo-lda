@@ -11,10 +11,20 @@ import org.apache.spark.storage.StorageLevel
 import scala.collection.mutable.ListBuffer
 import scala.util.Random
 
-class EdgeData(dimension: Int, numTopics: Int, rnd: Random) extends Serializable {
-  val topicAssignments = Array.ofDim[Int](dimension)
+class EdgeData(val dimension: Int, val numTopics: Int, rnd: Random) extends Serializable {
+  var topicAssignments = Array.ofDim[Int](dimension)
   for (i <- 0 until dimension) {
     topicAssignments(i) = rnd.nextInt(numTopics)
+  }
+
+  // FIXME
+  def this(other: EdgeData) {
+    this(other.dimension, other.numTopics, new Random())
+    topicAssignments = other.topicAssignments.clone()
+  }
+
+  override def clone() = {
+    new EdgeData(this)
   }
 
   def size = topicAssignments.length
@@ -28,6 +38,16 @@ class EdgeData(dimension: Int, numTopics: Int, rnd: Random) extends Serializable
 
 class VertexData(val numTopics: Int) extends Serializable {
   var topicAttachedCounts = BreezeVector.zeros[Int](numTopics)
+
+  def this(other: VertexData) {
+    this(other.numTopics)
+    topicAttachedCounts = BreezeVector(other.topicAttachedCounts.toArray.clone())
+  }
+
+  override def clone() = {
+    new VertexData(this)
+  }
+
   def increment(topicId: Int): Unit = {
     increment(topicId, 1)
   }
@@ -42,7 +62,7 @@ class VertexData(val numTopics: Int) extends Serializable {
   def add(otherVertexData: VertexData): VertexData = {
     require(topicAttachedCounts.size == otherVertexData.topicAttachedCounts.size)
     val newTopicAttachedCounts = topicAttachedCounts + otherVertexData.topicAttachedCounts
-    val newData = new VertexData(1)
+    val newData = new VertexData(numTopics)
     newData.topicAttachedCounts = newTopicAttachedCounts
     newData
   }
@@ -115,21 +135,25 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
     // init globalTopicCount
     val messages: VertexRDD[Msg]
       = prevG.aggregateMessages(sendMessage, mergeMessage).persist(StorageLevel.MEMORY_AND_DISK)
+    println(s"Messages: ${messages.collectAsMap()}")
     var newG = prevG.joinVertices(messages) {
-      case (vertexId, null, newData) => newData
+      case (vertexId, null, newData) => newData.clone()
     }
     // calculate topic counts for words and documents
-    globalTopicCount = calculateGlobalTopicCount(newG)
+    val globalTopicCount = calculateGlobalTopicCount(newG)
     newG = newG.mapTriplets((pid: PartitionID, iter: Iterator[EdgeTriplet[VD, ED]]) => {
       // sample the topic assignments z_{di}
       iter.map(triplet => {
-        val wordTopicCount = triplet.srcAttr
-        val docTopicCount = triplet.dstAttr
+        val wordTopicCount = triplet.srcAttr.clone()
+        val docTopicCount = triplet.dstAttr.clone()
         //require(docTopicCount.length == numTopics)
         //require(wordTopicCount.length == numTopics)
         // run the actual gibbs sampling
         val prob = BreezeVector.zeros[Double](numTopics)
         val assignment = triplet.attr
+        val newAssignment = assignment.clone()
+        println(s"DocId: ${triplet.dstId}, WordId: ${triplet.srcId}")
+        println(s"Assignment: $assignment\nwordTopicCount: $wordTopicCount\ndocTopicCount: $docTopicCount")
         val betaSum = beta * numWords
         for (i <- 0 until assignment.topicAssignments.length) {
           val oldTopicId = assignment.topicAssignments(i)
@@ -138,25 +162,30 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
           globalTopicCount.increment(oldTopicId, -1)
           for (t <- 0 until numTopics) {
             prob(t) = (alpha + docTopicCount(t)) * (beta + wordTopicCount(t)) / (betaSum + globalTopicCount(t))
+            if (prob(t) < 0) {
+              throw new IllegalArgumentException(s"t=$t, docTopic=${docTopicCount(t)}, " +
+              s"wordTopic=${wordTopicCount(t)}, globalTopic=${globalTopicCount(t)}")
+            }
           }
           val rnd = Multinomial(prob)
           val newTopicId = rnd.draw()
-          assignment.topicAssignments(i) = newTopicId
+          newAssignment.topicAssignments(i) = newTopicId
           docTopicCount.increment(newTopicId)
           wordTopicCount.increment(newTopicId)
           globalTopicCount.increment(newTopicId)
         } // End of loop over each token
-        assignment
+        newAssignment
       })
     }, TripletFields.All)
     graph = GraphImpl(newG.vertices.mapValues(t => null), newG.edges)
-    // FXIME: cause java.lang.UnsupportedOperationException:
+    // FIXME: cause java.lang.UnsupportedOperationException:
     // Cannot change storage level of an RDD after it was already assigned a level
     //graph.persist(StorageLevel.MEMORY_AND_DISK)
 
-    messages.unpersist(blocking = false)
-    prevG.edges.unpersist(blocking = false)
-    newG.unpersistVertices(blocking = false)
+    // FIXME: when I comment these things, prob(t)<0 exceptions disappear!
+    //messages.unpersist(blocking = false)
+    //prevG.edges.unpersist(blocking = false)
+    //newG.unpersistVertices(blocking = false)
   }
 
   private def sendMessage(triplet: EdgeContext[VD, ED, Msg]): Unit = {
@@ -165,8 +194,9 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
     for (w <- 0 until edgeData.size) {
       message.increment(edgeData(w))
     }
-    triplet.sendToSrc(message)
-    triplet.sendToDst(message)
+    println(s"[SendMessage] wordId: ${triplet.srcId}, docId: ${triplet.dstId}, edgeData: ${edgeData}, message: $message")
+    triplet.sendToSrc(message.clone())
+    triplet.sendToDst(message.clone())
   }
 
   private def mergeMessage(msgA: Msg, msgB: Msg): Msg = {
