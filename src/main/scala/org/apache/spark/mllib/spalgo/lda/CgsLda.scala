@@ -135,7 +135,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
     // init globalTopicCount
     val messages: VertexRDD[Msg]
       = prevG.aggregateMessages(sendMessage, mergeMessage).persist(StorageLevel.MEMORY_AND_DISK)
-    println(s"Messages: ${messages.collectAsMap()}")
+    //println(s"Messages: ${messages.collectAsMap()}")
     var newG = prevG.joinVertices(messages) {
       case (vertexId, null, newData) => newData.clone()
     }
@@ -152,8 +152,8 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
         val prob = BreezeVector.zeros[Double](numTopics)
         val assignment = triplet.attr
         val newAssignment = assignment.clone()
-        println(s"DocId: ${triplet.dstId}, WordId: ${triplet.srcId}")
-        println(s"Assignment: $assignment\nwordTopicCount: $wordTopicCount\ndocTopicCount: $docTopicCount")
+        //println(s"DocId: ${triplet.dstId}, WordId: ${triplet.srcId}")
+        //println(s"Assignment: $assignment\nwordTopicCount: $wordTopicCount\ndocTopicCount: $docTopicCount")
         val betaSum = beta * numWords
         for (i <- 0 until assignment.topicAssignments.length) {
           val oldTopicId = assignment.topicAssignments(i)
@@ -194,7 +194,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
     for (w <- 0 until edgeData.size) {
       message.increment(edgeData(w))
     }
-    println(s"[SendMessage] wordId: ${triplet.srcId}, docId: ${triplet.dstId}, edgeData: ${edgeData}, message: $message")
+    //println(s"[SendMessage] wordId: ${triplet.srcId}, docId: ${triplet.dstId}, edgeData: ${edgeData}, message: $message")
     triplet.sendToSrc(message.clone())
     triplet.sendToDst(message.clone())
   }

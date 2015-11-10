@@ -37,7 +37,7 @@ class CgsLdaSuite extends FunSuite with BeforeAndAfterAll with ShouldMatchers {
     assert(edges.length == 4)
     assert(vertices.size == 5)
 
-    cgsLda.train(documents, 100)
+    cgsLda.train(documents, 20)
 
     /*
     val messages = cgsLda.nextIteration()
