@@ -1,6 +1,7 @@
 package org.apache.spark.mllib.spalgo.lda
 
 import breeze.linalg.{CSCMatrix => BSM, DenseMatrix => BDM, DenseVector => BreezeDenseVector, Matrix => BM, SparseVector => BreezeSparseVector, Vector => BreezeVector}
+import breeze.numerics.lgamma
 import breeze.stats.distributions.Multinomial
 import org.apache.spark.graphx._
 import org.apache.spark.graphx.impl.GraphImpl
@@ -82,6 +83,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
   private type Msg = VertexData
 
   var numWords: Int = _
+  var numDocs: Int = _
   private var globalTopicCount: VertexData = _
   private var graph: Graph[VD, ED] = _
 
@@ -89,6 +91,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
   // edge-data: the topic assigned to every appearance of the word in this document
   def load(documents: RDD[(Long, Vector)]): Graph[VD, ED] = {
     this.numWords = documents.first()._2.size
+    this.numDocs = documents.count().asInstanceOf[Int]
     val edges = documents.mapPartitionsWithIndex((pid, iter) => {
       val gen = new Random(pid)
       iter.flatMap { case (docId, doc) =>
@@ -111,7 +114,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
 
   def estimateTopicDistributions(): Matrix = {
     val messages: VertexRDD[Msg]
-      = graph.aggregateMessages(sendMessage, mergeMessage).persist(StorageLevel.MEMORY_AND_DISK)
+    = graph.aggregateMessages(sendMessage, mergeMessage).persist(StorageLevel.MEMORY_AND_DISK)
     val newG = graph.joinVertices(messages) {
       case (vertexId, null, newData) => newData
     }
@@ -124,7 +127,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
       require(topicCount.numTopics == numTopics)
       for (t <- 0 until numTopics) {
         val phi = (topicCount(t) + beta) / (globalTopicCount(t) + betaSum)
-        wordTopicDistribution(wordId.toInt-1, t) = phi
+        wordTopicDistribution(wordId.toInt - 1, t) = phi
       }
     }
     wordTopicDistribution
@@ -134,7 +137,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
     val prevG = graph
     // init globalTopicCount
     val messages: VertexRDD[Msg]
-      = prevG.aggregateMessages(sendMessage, mergeMessage).persist(StorageLevel.MEMORY_AND_DISK)
+    = prevG.aggregateMessages(sendMessage, mergeMessage).persist(StorageLevel.MEMORY_AND_DISK)
     //println(s"Messages: ${messages.collectAsMap()}")
     var newG = prevG.joinVertices(messages) {
       case (vertexId, null, newData) => newData.clone()
@@ -164,7 +167,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
             prob(t) = (alpha + docTopicCount(t)) * (beta + wordTopicCount(t)) / (betaSum + globalTopicCount(t))
             if (prob(t) < 0) {
               throw new IllegalArgumentException(s"t=$t, docTopic=${docTopicCount(t)}, " +
-              s"wordTopic=${wordTopicCount(t)}, globalTopic=${globalTopicCount(t)}")
+                s"wordTopic=${wordTopicCount(t)}, globalTopic=${globalTopicCount(t)}")
             }
           }
           val rnd = Multinomial(prob)
@@ -209,10 +212,10 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
   }
 
   private def initializeEdges(
-     rnd: Random,
-     words: Vector,
-     docId: Long,
-     numTopics: Int) = {
+      rnd: Random,
+      words: Vector,
+      docId: Long,
+      numTopics: Int) = {
     require(docId >= 0, s"Invalid document id $docId")
     val vertexDocId = -(docId + 1L)
     val edges = ListBuffer[Edge[ED]]()
@@ -224,5 +227,59 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
       case _ =>
     }
     edges
+  }
+
+  def likMap(vertexId: VertexId, data: VertexData) = {
+    // using boost::math::lgamma;
+    require(data.numTopics == numTopics)
+    val aggregator = new LikelihoodAggregator
+    if (vertexId > 0) { // is word
+      for (t <- 0 until numTopics) {
+        val topicCount = data(t)
+        require(topicCount >= 0)
+        // TODO
+        aggregator.likWordsGivenTopics += lgamma(topicCount + beta)
+        //aggregator.likWordsGivenTopics += BETA_LGAMMA(topicCount)
+      }
+    } else { // is doc
+    var ntokensInDoc = 0d
+      for(t <- 0 until numTopics) {
+        val topicCount = data(t)
+        require(topicCount >= 0)
+        // TODO
+        aggregator.likTopics += lgamma(topicCount + alpha)
+        //aggregator.likTopics += ALPHA_LGAMMA(topicCount)
+        ntokensInDoc += topicCount
+      }
+      aggregator.likTopics -= lgamma(ntokensInDoc + numTopics * alpha)
+    }
+    aggregator
+  }
+
+  def likReduce(agg1: LikelihoodAggregator, agg2: LikelihoodAggregator) = {
+    val likAggregator = new LikelihoodAggregator()
+    likAggregator.likTopics = agg1.likTopics + agg2.likTopics
+    likAggregator.likWordsGivenTopics = agg1.likWordsGivenTopics + agg2.likWordsGivenTopics
+    likAggregator
+  }
+
+  def likFinalize(likAggregator: LikelihoodAggregator) = {
+    // Address the global sum terms
+    var denominator = 0d
+    for (t <- 0 until numTopics) {
+      val value = globalTopicCount(t)
+      require(value >= 0)
+      denominator += lgamma(value + numWords * beta)
+    }
+
+    val likWordsGivenTopics =
+      numTopics * (lgamma(numWords * beta) - numWords * lgamma(beta)) -
+        denominator + likAggregator.likWordsGivenTopics
+
+    val likTopics =
+      numDocs * (lgamma(numTopics * alpha) - numTopics * lgamma(alpha)) +
+        likAggregator.likTopics
+
+    likWordsGivenTopics + likTopics
   }
 }
