@@ -114,7 +114,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
 
   def estimateTopicDistributions(): Matrix = {
     val messages: VertexRDD[Msg]
-    = graph.aggregateMessages(sendMessage, mergeMessage).persist(StorageLevel.MEMORY_AND_DISK)
+      = graph.aggregateMessages(sendMessage, mergeMessage).persist(StorageLevel.MEMORY_AND_DISK)
     val newG = graph.joinVertices(messages) {
       case (vertexId, null, newData) => newData
     }
@@ -143,7 +143,9 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
       case (vertexId, null, newData) => newData.clone()
     }
     // calculate topic counts for words and documents
-    val globalTopicCount = calculateGlobalTopicCount(newG)
+    globalTopicCount = calculateGlobalTopicCount(newG)
+    val logLik = calculateLogLikelihood(newG)
+    println(s"********* LogLikelihood: $logLik")
     newG = newG.mapTriplets((pid: PartitionID, iter: Iterator[EdgeTriplet[VD, ED]]) => {
       // sample the topic assignments z_{di}
       iter.map(triplet => {
@@ -211,6 +213,13 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
     g.vertices.filter(t => t._1 > 0).map(_._2).aggregate(new VD(numTopics))(_ + _, _ + _)
   }
 
+  private def calculateLogLikelihood(g: Graph[VD, ED]): Double = {
+    val likAgg = g.vertices.map {
+      case (vertexId: VertexId, data: VertexData) => likMap(vertexId, data)
+    }.aggregate(new LikelihoodAggregator)(likReduce, likReduce)
+    likFinalize(likAgg)
+  }
+
   private def initializeEdges(
       rnd: Random,
       words: Vector,
@@ -230,7 +239,6 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
   }
 
   def likMap(vertexId: VertexId, data: VertexData) = {
-    // using boost::math::lgamma;
     require(data.numTopics == numTopics)
     val aggregator = new LikelihoodAggregator
     if (vertexId > 0) { // is word
@@ -256,14 +264,14 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
     aggregator
   }
 
-  def likReduce(agg1: LikelihoodAggregator, agg2: LikelihoodAggregator) = {
+  def likReduce(agg1: LikelihoodAggregator, agg2: LikelihoodAggregator): LikelihoodAggregator = {
     val likAggregator = new LikelihoodAggregator()
     likAggregator.likTopics = agg1.likTopics + agg2.likTopics
     likAggregator.likWordsGivenTopics = agg1.likWordsGivenTopics + agg2.likWordsGivenTopics
     likAggregator
   }
 
-  def likFinalize(likAggregator: LikelihoodAggregator) = {
+  def likFinalize(likAggregator: LikelihoodAggregator): Double = {
     // Address the global sum terms
     var denominator = 0d
     for (t <- 0 until numTopics) {
