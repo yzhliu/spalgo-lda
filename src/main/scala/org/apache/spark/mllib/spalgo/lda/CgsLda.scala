@@ -238,6 +238,36 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
     edges
   }
 
+  /**
+   * From GraphLab: cgs_lda.cpp
+   * \brief The Likelihood aggregators maintains the current estimate of
+   * the log-likelihood of the current token assignments.
+   *
+   *  llik_words_given_topics = ...
+   *    ntopics * (gammaln(nwords * beta) - nwords * gammaln(beta)) - ...
+   *    sum_t(gammaln( n_t + nwords * beta)) +
+   *    sum_w(sum_t(gammaln(n_wt + beta)));
+   *
+   *  llik_topics = ...
+   *    ndocs * (gammaln(ntopics * alpha) - ntopics * gammaln(alpha)) + ...
+   *    sum_d(sum_t(gammaln(n_td + alpha)) - gammaln(sum_t(n_td) + ntopics * alpha));
+   *
+   * Latex formulation:
+   *
+  \mathcal{L}( w | z) & = T * \left( \log\Gamma(W * \beta) - W * \log\Gamma(\beta) \right) + \\
+    & \sum_{t} \left( \left(\sum_{w} \log\Gamma(N_{wt} + \beta)\right) -
+           \log\Gamma\left( W * \beta + \sum_{w} N_{wt}  \right) \right) \\
+    & = T * \left( \log\Gamma(W * \beta) - W * \log\Gamma(\beta) \right) -
+        \sum_{t} \log\Gamma\left( W * \beta + N_{t}  \right) + \\
+    & \sum_{w} \sum_{t} \log\Gamma(N_{wt} + \beta)   \\
+    \\
+    \mathcal{L}(z) & = D * \left(\log\Gamma(T * \alpha) - T * \log\Gamma(\alpha) \right) + \\
+    & \sum_{d} \left( \left(\sum_{t}\log\Gamma(N_{td} + \alpha)\right) -
+        \log\Gamma\left( T * \alpha + \sum_{t} N_{td} \right) \right) \\
+    \\
+    \mathcal{L}(w,z) & = \mathcal{L}(w | z) + \mathcal{L}(z)
+   *
+   */
   def likMap(vertexId: VertexId, data: VertexData) = {
     require(data.numTopics == numTopics)
     val aggregator = new LikelihoodAggregator
