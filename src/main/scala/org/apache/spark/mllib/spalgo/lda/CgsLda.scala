@@ -98,7 +98,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
         initializeEdges(gen, doc, docId, numTopics)
       }
     })
-    graph = Graph.fromEdges(edges, null, edgeStorageLevel = StorageLevel.MEMORY_AND_DISK)
+    graph = Graph.fromEdges(edges, null, edgeStorageLevel = StorageLevel.MEMORY_AND_DISK, vertexStorageLevel = StorageLevel.MEMORY_AND_DISK)
     graph
   }
 
@@ -114,7 +114,8 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
 
   def estimateTopicDistributions(): Matrix = {
     val messages: VertexRDD[Msg]
-      = graph.aggregateMessages(sendMessage, mergeMessage).persist(StorageLevel.MEMORY_AND_DISK)
+      = graph.aggregateMessages(sendMessage, mergeMessage)//.persist(StorageLevel.MEMORY_AND_DISK)
+
     val newG = graph.joinVertices(messages) {
       case (vertexId, null, newData) => newData
     }
@@ -137,7 +138,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
     val prevG = graph
     // init globalTopicCount
     val messages: VertexRDD[Msg]
-    = prevG.aggregateMessages(sendMessage, mergeMessage).persist(StorageLevel.MEMORY_AND_DISK)
+      = prevG.aggregateMessages(sendMessage, mergeMessage) // TODO .persist(StorageLevel.MEMORY_AND_DISK)
     //println(s"Messages: ${messages.collectAsMap()}")
     var newG = prevG.joinVertices(messages) {
       case (vertexId, null, newData) => newData.clone()
@@ -181,16 +182,16 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
         } // End of loop over each token
         newAssignment
       })
-    }, TripletFields.All)
+    }, TripletFields.All).cache()
     graph = GraphImpl(newG.vertices.mapValues(t => null), newG.edges)
     // FIXME: cause java.lang.UnsupportedOperationException:
     // Cannot change storage level of an RDD after it was already assigned a level
     //graph.persist(StorageLevel.MEMORY_AND_DISK)
 
-    // FIXME: when I comment these things, prob(t)<0 exceptions disappear!
-    //messages.unpersist(blocking = false)
-    //prevG.edges.unpersist(blocking = false)
-    //newG.unpersistVertices(blocking = false)
+    // TODO messages.unpersist(blocking = false)
+    prevG.edges.unpersist(blocking = false)
+    newG.vertices.unpersist(blocking = false)
+    //TODO: not sure: newG.unpersistVertices(blocking = false)
   }
 
   private def sendMessage(triplet: EdgeContext[VD, ED, Msg]): Unit = {
@@ -238,6 +239,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
     edges
   }
 
+  // scalastyle:off
   /**
    * From GraphLab: cgs_lda.cpp
    * \brief The Likelihood aggregators maintains the current estimate of
@@ -268,6 +270,7 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
     \mathcal{L}(w,z) & = \mathcal{L}(w | z) + \mathcal{L}(z)
    *
    */
+  // scalastyle:on
   def likMap(vertexId: VertexId, data: VertexData) = {
     require(data.numTopics == numTopics)
     val aggregator = new LikelihoodAggregator
