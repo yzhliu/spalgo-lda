@@ -18,16 +18,6 @@ class EdgeData(val dimension: Int, val numTopics: Int, rnd: Random) extends Seri
     topicAssignments(i) = rnd.nextInt(numTopics)
   }
 
-  // FIXME
-  def this(other: EdgeData) {
-    this(other.dimension, other.numTopics, new Random())
-    topicAssignments = other.topicAssignments.clone()
-  }
-
-  override def clone() = {
-    new EdgeData(this)
-  }
-
   def size = topicAssignments.length
 
   def apply(idx: Int) = topicAssignments(idx)
@@ -39,15 +29,6 @@ class EdgeData(val dimension: Int, val numTopics: Int, rnd: Random) extends Seri
 
 class VertexData(val numTopics: Int) extends Serializable {
   var topicAttachedCounts = BreezeVector.zeros[Int](numTopics)
-
-  def this(other: VertexData) {
-    this(other.numTopics)
-    topicAttachedCounts = BreezeVector(other.topicAttachedCounts.toArray.clone())
-  }
-
-  override def clone() = {
-    new VertexData(this)
-  }
 
   def increment(topicId: Int): Unit = {
     increment(topicId, 1)
@@ -139,9 +120,8 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
     // init globalTopicCount
     val messages: VertexRDD[Msg]
       = prevG.aggregateMessages(sendMessage, mergeMessage) // TODO .persist(StorageLevel.MEMORY_AND_DISK)
-    //println(s"Messages: ${messages.collectAsMap()}")
     var newG = prevG.joinVertices(messages) {
-      case (vertexId, null, newData) => newData.clone()
+      case (vertexId, null, newData) => newData
     }
     // calculate topic counts for words and documents
     globalTopicCount = calculateGlobalTopicCount(newG)
@@ -150,16 +130,14 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
     newG = newG.mapTriplets((pid: PartitionID, iter: Iterator[EdgeTriplet[VD, ED]]) => {
       // sample the topic assignments z_{di}
       iter.map(triplet => {
-        val wordTopicCount = triplet.srcAttr.clone()
-        val docTopicCount = triplet.dstAttr.clone()
+        val wordTopicCount = triplet.srcAttr
+        val docTopicCount = triplet.dstAttr
         //require(docTopicCount.length == numTopics)
         //require(wordTopicCount.length == numTopics)
         // run the actual gibbs sampling
         val prob = BreezeVector.zeros[Double](numTopics)
         val assignment = triplet.attr
-        val newAssignment = assignment.clone()
-        //println(s"DocId: ${triplet.dstId}, WordId: ${triplet.srcId}")
-        //println(s"Assignment: $assignment\nwordTopicCount: $wordTopicCount\ndocTopicCount: $docTopicCount")
+        val newAssignment = assignment
         val betaSum = beta * numWords
         for (i <- 0 until assignment.topicAssignments.length) {
           val oldTopicId = assignment.topicAssignments(i)
@@ -201,8 +179,8 @@ class CgsLda(val alpha: Double, val beta: Double, val numTopics: Int) extends Se
       message.increment(edgeData(w))
     }
     //println(s"[SendMessage] wordId: ${triplet.srcId}, docId: ${triplet.dstId}, edgeData: ${edgeData}, message: $message")
-    triplet.sendToSrc(message.clone())
-    triplet.sendToDst(message.clone())
+    triplet.sendToSrc(message)
+    triplet.sendToDst(message)
   }
 
   private def mergeMessage(msgA: Msg, msgB: Msg): Msg = {
